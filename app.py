@@ -17,9 +17,21 @@ logger = logging.getLogger(__name__)
 # Cấu hình Flask
 flask_app = Flask(__name__)
 
-# Cấu hình API key
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7589027326:AAEV-zWEAByhhj-8mxGpQ9ZdjiCrWP58shY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyB5E5i1WMUR963uLh7N3fDOf43tEaxptcE")
+# Cấu hình biến môi trường
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "gemini-bot-chat.onrender.com")
+
+# Kiểm tra biến môi trường bắt buộc
+missing_vars = []
+if not TELEGRAM_TOKEN:
+    missing_vars.append("TELEGRAM_TOKEN")
+if not GEMINI_API_KEY:
+    missing_vars.append("GEMINI_API_KEY")
+if missing_vars:
+    logger.error("Missing required environment variables: %s", ", ".join(missing_vars))
+    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
 # Cấu hình Gemini
 genai.configure(api_key=GEMINI_API_KEY)
@@ -43,23 +55,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def gemini_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Xử lý tin nhắn và gửi phản hồi từ Gemini API."""
     user_message = update.message.text
-    
-    # Thông báo đang gõ...
-    await context.bot.send_chat_action(
-        chat_id=update.effective_message.chat_id, 
-        action="typing"
-    )
-    
+    logger.info("Processing message: %s", user_message)
+    await context.bot.send_chat_action(chat_id=update.effective_message.chat_id, action="typing")
     try:
-        # Gọi Gemini API sử dụng requests
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL}:generateContent"
+        params = {"key": GEMINI_API_KEY}
         headers = {"Content-Type": "application/json"}
-        data = {
-            "contents": [{"parts": [{"text": user_message}]}]
-        }
-        
-        response = requests.post(url, headers=headers, data=json.dumps(data))
-        
+        data = {"contents": [{"parts": [{"text": user_message}]}]}
+        logger.info("Sending request to Gemini API")
+        response = requests.post(url, headers=headers, params=params, data=json.dumps(data))
+        logger.info("Gemini API response status: %s", response.status_code)
         if response.status_code == 200:
             response_json = response.json()
             if "candidates" in response_json and len(response_json["candidates"]) > 0:
@@ -70,12 +75,13 @@ async def gemini_response(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 else:
                     await update.message.reply_text(response_text)
             else:
+                logger.warning("No candidates in Gemini response: %s", response_json)
                 await update.message.reply_text("Không nhận được phản hồi từ Gemini API.")
         else:
+            logger.error("Gemini API error: %s - %s", response.status_code, response.text)
             await update.message.reply_text(f"Lỗi API: {response.status_code} - {response.text}")
-            
     except Exception as e:
-        logger.error(f"Lỗi khi gọi Gemini API: {e}")
+        logger.error("Error calling Gemini API: %s", str(e))
         await update.message.reply_text(f"Xin lỗi, đã xảy ra lỗi: {str(e)}")
 
 # Đăng ký handlers
@@ -86,27 +92,38 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gemini_r
 # Flask routes
 @flask_app.route('/healthz')
 def health():
-    """Endpoint cho UptimeRobot."""
+    logger.info("Health check accessed")
     return 'OK', 200
 
 @flask_app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
 async def webhook():
-    """Xử lý webhook từ Telegram."""
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
-    return 'OK', 200
+    logger.info("Received webhook update: %s", request.get_json(force=True))
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        if update:
+            logger.info("Processing update: %s", update)
+            await application.process_update(update)
+        else:
+            logger.warning("Invalid update received")
+        return 'OK', 200
+    except Exception as e:
+        logger.error("Error processing webhook: %s", str(e))
+        return 'Error', 500
 
 async def set_webhook():
     """Thiết lập webhook cho Telegram."""
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/{TELEGRAM_TOKEN}"
-    await application.bot.set_webhook(url=webhook_url)
+    webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_TOKEN}"
+    logger.info("Setting webhook to: %s", webhook_url)
+    try:
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info("Webhook set successfully")
+    except Exception as e:
+        logger.error("Failed to set webhook: %s", str(e))
+        raise
 
 def main():
     """Khởi động bot và Flask server."""
-    # Khởi tạo application
     application.loop.run_until_complete(set_webhook())
-    
-    # Chạy Flask server
     port = int(os.getenv('PORT', 10000))
     flask_app.run(host='0.0.0.0', port=port)
 
