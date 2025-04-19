@@ -7,6 +7,7 @@ import json
 from flask import Flask, request
 import os
 import asyncio
+import threading
 
 # Cấu hình logging
 logging.basicConfig(
@@ -36,6 +37,10 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # Tạo Telegram Application
 application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# Khởi tạo biến để lưu trữ event loop
+application_event_loop = None
+initialized = False
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Gửi tin nhắn khi nhận được lệnh /start."""
@@ -87,6 +92,36 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gemini_response))
 
+# Hàm khởi tạo ứng dụng Telegram Bot
+async def initialize_application():
+    """Khởi tạo ứng dụng Telegram Bot"""
+    global initialized
+    
+    if not initialized:
+        logger.info("Initializing application...")
+        await application.initialize()
+        initialized = True
+        logger.info("Application initialized successfully")
+    return application
+
+# Hàm để khởi động event loop và khởi tạo application
+def init_application():
+    """Khởi động event loop và khởi tạo application"""
+    global application_event_loop
+    
+    # Tạo event loop nếu chưa có
+    if application_event_loop is None:
+        application_event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(application_event_loop)
+        
+        # Khởi tạo application
+        application_event_loop.run_until_complete(initialize_application())
+        
+        logger.info("Application event loop started and application initialized")
+
+# Gọi hàm khởi tạo ứng dụng khi module được import
+init_application()
+
 # Cấu hình Flask
 flask_app = Flask(__name__)
 
@@ -100,17 +135,22 @@ def health():
 def webhook_handler():
     """Xử lý webhook từ Telegram"""
     logger.info("Received webhook update")
-    json_data = request.get_json(force=True)
-    logger.info("Update data: %s", json_data)
     
-    # Tạo hàm xử lý cập nhật không đồng bộ và chạy nó
-    async def process_update_async():
+    try:
+        json_data = request.get_json(force=True)
+        logger.info("Update data: %s", json_data)
+        
+        # Tạo cập nhật từ dữ liệu JSON
         update = Update.de_json(json_data, application.bot)
-        await application.process_update(update)
-    
-    # Thực thi hàm không đồng bộ
-    asyncio.run(process_update_async())
-    return 'OK', 200
+        
+        # Xử lý cập nhật
+        application_event_loop.run_until_complete(application.process_update(update))
+        
+        return 'OK', 200
+    except Exception as e:
+        logger.error("Error in webhook handler: %s", str(e))
+        # Trả về 200 dù có lỗi để Telegram không gửi lại update
+        return 'Error', 200
 
 @flask_app.route('/set_webhook', methods=['GET'])
 def set_webhook_handler():
@@ -119,11 +159,8 @@ def set_webhook_handler():
     logger.info("Setting webhook to: %s", webhook_url)
     
     try:
-        # Tạo và chạy task không đồng bộ
-        async def setup_webhook():
-            await application.bot.set_webhook(url=webhook_url)
-        
-        asyncio.run(setup_webhook())
+        # Thiết lập webhook
+        application_event_loop.run_until_complete(application.bot.set_webhook(url=webhook_url))
         return f"Webhook đã được thiết lập thành công tại: {webhook_url}", 200
     except Exception as e:
         logger.error("Failed to set webhook: %s", str(e))
@@ -131,7 +168,7 @@ def set_webhook_handler():
 
 def main():
     """Khởi động Flask server"""
-    # Thiết lập webhook thông qua API endpoint sau khi server đã chạy
+    # Cổng mặc định cho Render
     port = int(os.getenv('PORT', 10000))
     logger.info(f"Starting Flask server on port {port}")
     flask_app.run(host='0.0.0.0', port=port)
