@@ -6,6 +6,7 @@ import requests
 import json
 from flask import Flask, request
 import os
+import asyncio
 
 # Cấu hình logging
 logging.basicConfig(
@@ -13,9 +14,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# Cấu hình Flask
-flask_app = Flask(__name__)
 
 # Cấu hình biến môi trường
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -89,6 +87,9 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, gemini_response))
 
+# Cấu hình Flask
+flask_app = Flask(__name__)
+
 # Flask routes
 @flask_app.route('/healthz')
 def health():
@@ -96,35 +97,43 @@ def health():
     return 'OK', 200
 
 @flask_app.route(f'/{TELEGRAM_TOKEN}', methods=['POST'])
-async def webhook():
-    logger.info("Received webhook update: %s", request.get_json(force=True))
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        if update:
-            logger.info("Processing update: %s", update)
-            await application.process_update(update)
-        else:
-            logger.warning("Invalid update received")
-        return 'OK', 200
-    except Exception as e:
-        logger.error("Error processing webhook: %s", str(e))
-        return 'Error', 500
+def webhook_handler():
+    """Xử lý webhook từ Telegram"""
+    logger.info("Received webhook update")
+    json_data = request.get_json(force=True)
+    logger.info("Update data: %s", json_data)
+    
+    # Tạo hàm xử lý cập nhật không đồng bộ và chạy nó
+    async def process_update_async():
+        update = Update.de_json(json_data, application.bot)
+        await application.process_update(update)
+    
+    # Thực thi hàm không đồng bộ
+    asyncio.run(process_update_async())
+    return 'OK', 200
 
-async def set_webhook():
-    """Thiết lập webhook cho Telegram."""
+@flask_app.route('/set_webhook', methods=['GET'])
+def set_webhook_handler():
+    """API endpoint để thiết lập webhook"""
     webhook_url = f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_TOKEN}"
     logger.info("Setting webhook to: %s", webhook_url)
+    
     try:
-        await application.bot.set_webhook(url=webhook_url)
-        logger.info("Webhook set successfully")
+        # Tạo và chạy task không đồng bộ
+        async def setup_webhook():
+            await application.bot.set_webhook(url=webhook_url)
+        
+        asyncio.run(setup_webhook())
+        return f"Webhook đã được thiết lập thành công tại: {webhook_url}", 200
     except Exception as e:
         logger.error("Failed to set webhook: %s", str(e))
-        raise
+        return f"Lỗi khi thiết lập webhook: {str(e)}", 500
 
 def main():
-    """Khởi động bot và Flask server."""
-    application.loop.run_until_complete(set_webhook())
+    """Khởi động Flask server"""
+    # Thiết lập webhook thông qua API endpoint sau khi server đã chạy
     port = int(os.getenv('PORT', 10000))
+    logger.info(f"Starting Flask server on port {port}")
     flask_app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
